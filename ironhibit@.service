@@ -1,0 +1,27 @@
+# ~/.config/systemd/user/ironhibit@.service
+[Unit]
+Description=Inhibit idle for %i
+Conflicts=ironhibit@*.service
+
+[Service]
+ExecStart=/bin/sh -c '
+  arg="%i"
+  if [ "$arg" = "stop" ] || [ "$arg" = "cancel" ]; then
+    systemctl --user stop ironhibit-timer.service
+    exit 0
+  fi
+  case "$arg" in
+    [0-9]*[smhd])
+      n=${arg%[smhd]}; u=${arg#"$n"}
+      case "$n" in *[!0-9]*|""|*[0-9][0-9][0-9][0-9][0-9]*) echo "Invalid duration: %i" >&2; exit 1;; esac
+      case "$u" in s) mul=1;; m) mul=60;; h) mul=3600;; d) mul=86400;; *) echo "Invalid unit in: %i" >&2; exit 1;; esac
+      dur_s=$((n*mul))
+      ;;
+    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]) dur_s=$arg ;;
+    *) echo "Invalid duration format: %i" >&2; exit 1 ;;
+  esac
+  systemctl --user stop ironhibit-timer.service >/dev/null 2>&1 || true
+  while systemctl --user is-active ironhibit-timer.service >/dev/null 2>&1; do sleep 0.1; done
+  systemd-run --quiet --user --unit=ironhibit-timer --setenv=INHIBIT_DURATION="$dur_s" \
+    systemd-inhibit --what=idle:sleep --why="User ironhibit for %i" sleep "$dur_s"
+'

@@ -1,0 +1,42 @@
+# ~/.config/systemd/user/ironhibit.socket
+[Unit]
+Description=Inhibit seconds-remaining query socket
+
+[Socket]
+ListenStream=%t/ironhibit.sock
+Accept=yes
+MaxConnections=5
+
+[Install]
+WantedBy=sockets.target
+
+[Service]
+StandardInput=null
+
+ExecStart=/bin/sh -c '
+  status=$(systemctl --user show ironhibit-timer -p ActiveState -p ActiveEnterTimestampMonotonic -p Environment --value 2>/dev/null | head -3)
+  active=$(echo "$status" | sed -n "1p")
+  start_mono=$(echo "$status" | sed -n "2p")
+  env=$(echo "$status" | sed -n "3p")
+  
+  if [ "$active" != "active" ] || [ -z "$start_mono" ] || [ "$start_mono" = "0" ]; then
+    printf "%s\n" "00:00"; exit 0
+  fi
+
+  dur_s=$(echo "$env" | sed -n 's/.*INHIBIT_DURATION=\([0-9][0-9]*\).*/\1/p')
+  if [ -z "$dur_s" ] || [ "$dur_s" -eq 0 ] 2>/dev/null; then
+    printf "%s\n" "??:??"; exit 1
+  fi
+
+  while true; do
+    active=$(systemctl --user show ironhibit-timer -p ActiveState --value 2>/dev/null)
+    [ "$active" != "active" ] && { printf "00:00\n"; exit 0; }
+    now_mono=$(awk "{print int(\$1 * 1000000)}" /proc/uptime)
+    elapsed=$(( (now_mono - start_mono) / 1000000 ))
+    left=$(( dur_s - elapsed ))
+    [ "$left" -lt 0 ] && left=0
+    printf "%02d:%02d\n" $((left/60)) $((left%60))
+    [ "$left" -eq 0 ] && exit 0
+    sleep 1
+  done
+'
