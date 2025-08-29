@@ -1,4 +1,14 @@
 # ~/.config/systemd/user/ironhibit.socket
+#
+# This socket-activated service provides real-time countdown information
+# for the ironhibit sleep inhibitor. It monitors the ironhibit-timer
+# transient service and streams remaining time in MM:SS format.
+#
+# The service uses:
+# - D-Bus monitoring for efficient state change detection
+# - systemd's monotonic timestamps for accurate time calculation
+# - No polling - relies on D-Bus events and natural timer expiration
+#
 [Unit]
 Description=Inhibit seconds-remaining query socket
 
@@ -14,29 +24,53 @@ WantedBy=sockets.target
 StandardInput=null
 
 ExecStart=/bin/sh -c '
+  # Get initial timer state and timing information
   status=$(systemctl --user show ironhibit-timer -p ActiveState -p ActiveEnterTimestampMonotonic -p Environment --value 2>/dev/null | head -3)
   active=$(echo "$status" | sed -n "1p")
   start_mono=$(echo "$status" | sed -n "2p")
   env=$(echo "$status" | sed -n "3p")
   
+  # Return immediately if timer is not active
   if [ "$active" != "active" ] || [ -z "$start_mono" ] || [ "$start_mono" = "0" ]; then
     printf "%s\n" "00:00"; exit 0
   fi
 
-  dur_s=$(echo "$env" | sed -n 's/.*INHIBIT_DURATION=\([0-9][0-9]*\).*/\1/p')
-  if [ -z "$dur_s" ] || [ "$dur_s" -eq 0 ] 2>/dev/null; then
+  # Extract duration from environment
+  dur_s=${env#*INHIBIT_DURATION=}
+  dur_s=${dur_s%% *}
+  if [ -z "$dur_s" ] || [ "$dur_s" -le 0 ]; then
     printf "%s\n" "??:??"; exit 1
   fi
 
+  # Start D-Bus monitor for unit state changes in background
+  dbus-monitor --session --monitor "type=signal,interface=org.freedesktop.DBus.Properties,member=PropertiesChanged,path=/org/freedesktop/systemd1/unit/ironhibit_2dtimer_2eservice" 2>/dev/null | {
+    while read line; do
+      if echo "$line" | grep -q "ActiveState.*inactive\|ActiveState.*failed"; then
+        kill $$
+        break
+      fi
+    done
+  } &
+  monitor_pid=$!
+
+  # Main timing loop - no polling, rely on D-Bus monitoring and natural expiration
   while true; do
-    active=$(systemctl --user show ironhibit-timer -p ActiveState --value 2>/dev/null)
-    [ "$active" != "active" ] && { printf "00:00\n"; exit 0; }
+    # Calculate remaining time
     now_mono=$(awk "{print int(\$1 * 1000000)}" /proc/uptime)
     elapsed=$(( (now_mono - start_mono) / 1000000 ))
     left=$(( dur_s - elapsed ))
     [ "$left" -lt 0 ] && left=0
     printf "%02d:%02d\n" $((left/60)) $((left%60))
-    [ "$left" -eq 0 ] && exit 0
+    
+    # Exit when timer naturally expires
+    if [ "$left" -eq 0 ]; then
+      kill $monitor_pid
+      exit 0
+    fi
+    
     sleep 1
   done
+  
+  # Cleanup
+  kill $monitor_pid
 '

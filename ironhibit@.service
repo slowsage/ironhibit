@@ -1,4 +1,14 @@
 # ~/.config/systemd/user/ironhibit@.service
+#
+# Template service that creates transient sleep inhibitor timers.
+# Usage: systemctl --user start ironhibit@30m
+#
+# This service:
+# - Parses duration arguments (30m, 2h, 90s, etc.) using systemd-analyze
+# - Creates a transient ironhibit-timer unit via systemd-run
+# - Uses systemd-inhibit to prevent sleep/suspend for the specified duration
+# - Conflicts with other instances to ensure only one timer runs at a time
+#
 [Unit]
 Description=Inhibit idle for %i
 Conflicts=ironhibit@*.service
@@ -6,22 +16,22 @@ Conflicts=ironhibit@*.service
 [Service]
 ExecStart=/bin/sh -c '
   arg="%i"
+  
+  # Handle stop/cancel commands
   if [ "$arg" = "stop" ] || [ "$arg" = "cancel" ]; then
     systemctl --user stop ironhibit-timer.service
     exit 0
   fi
-  case "$arg" in
-    [0-9]*[smhd])
-      n=${arg%[smhd]}; u=${arg#"$n"}
-      case "$n" in *[!0-9]*|""|*[0-9][0-9][0-9][0-9][0-9]*) echo "Invalid duration: %i" >&2; exit 1;; esac
-      case "$u" in s) mul=1;; m) mul=60;; h) mul=3600;; d) mul=86400;; *) echo "Invalid unit in: %i" >&2; exit 1;; esac
-      dur_s=$((n*mul))
-      ;;
-    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]) dur_s=$arg ;;
-    *) echo "Invalid duration format: %i" >&2; exit 1 ;;
-  esac
+  
+  # Parse duration using systemd-analyze (part of core systemd)
+  dur_s=$(systemd-analyze timespan "$arg" 2>/dev/null | awk "/μs in seconds/{print int(\$1/1000000)}")
+  if [ -z "$dur_s" ] || [ "$dur_s" -le 0 ]; then
+    echo "Invalid duration format: %i (use systemd timespan format like 30m, 2h, 90s)" >&2
+    exit 1
+  fi
+  
+  # Stop any existing timer and start new one
   systemctl --user stop ironhibit-timer.service >/dev/null 2>&1 || true
-  while systemctl --user is-active ironhibit-timer.service >/dev/null 2>&1; do sleep 0.1; done
   systemd-run --quiet --user --unit=ironhibit-timer --setenv=INHIBIT_DURATION="$dur_s" \
     systemd-inhibit --what=idle:sleep --why="User ironhibit for %i" sleep "$dur_s"
 '
